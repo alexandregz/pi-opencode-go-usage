@@ -4,20 +4,18 @@
  * Shows OpenCode Go usage limits — rolling 5-hour, weekly, and monthly — in a
  * live status bar and a `/opencode-go` report widget.
  *
- * Core: the `/console/<wrk_…>/go` screen is a client-side app, so the HTML
- * carries no numbers. It loads them from the console JSON API:
+ * Core: the ZEN API exposes usage directly, keyed by a Go API key:
  *
- *     GET /console/api/go/status           (x-org-id: wrk_…)
- *     -> { access: { meters: {
- *            fiveHour: {resetsAt, limitMicroCents, usedMicroCents},
- *            week:     {resetsAt, limitMicroCents, usedMicroCents},
- *            month:    {limitMicroCents, usedMicroCents} } } }
+ *     GET https://opencode.ai/zen/go/v1/usage     (Authorization: Bearer <api-key>)
+ *     -> { usage: {
+ *            rolling: { status, percent, resetsAt },
+ *            weekly:  { status, percent, resetsAt },
+ *            monthly: { status, percent, resetsAt } } }
  *
- * So this extension calls that endpoint with your browser session cookie and
- * derives the three percentages (used/limit; micro-cents are 1e-8 dollars)
- * plus reset countdowns. It reports percentages and countdowns only. The month
- * meter has no window, so its reset is the paid period end (`access.endsAt`) —
- * the same value the console shows.
+ * So this extension calls that endpoint with your Go API key and reads the
+ * three percentages (`percent` is already a 0-100 number) plus reset
+ * countdowns (`resetsAt` is an ISO rollover timestamp on each window). It
+ * reports percentages and countdowns only.
  *
  * UI: mirrors pi-opencode-usage — a status bar after each refresh plus a
  * `/opencode-go` slash command with subcommands for setup and export.
@@ -33,13 +31,12 @@ interface UsageMeter {
  kind: MeterKind;
  /** 0-100, clamped. */
  percent: number;
- /** ISO timestamp of rollover, or null when the window is not open. */
+ /** ISO timestamp of rollover, or null when the window reports none. */
  resetsAt: string | null;
 }
 
 interface Config {
- workspaceId?: string;
- authCookie?: string;
+ apiKey?: string;
  compact?: boolean;
 }
 
@@ -52,12 +49,11 @@ type FetchFailure =
  | { kind: "noSubscription" }
  | { kind: "noPayload" };
 
-const WINDOW_KEYS: { key: string; kind: MeterKind; fallsBackToPeriodEnd?: boolean }[] = [
- { key: "fiveHour", kind: "five_hour" },
- { key: "week", kind: "calendar_week" },
- // The month meter has no window of its own, so the console shows the paid
- // period end (`access.endsAt`) as its reset — mirror that.
- { key: "month", kind: "product_period", fallsBackToPeriodEnd: true },
+/** ZEN window name -> meter kind. */
+const WINDOW_KINDS: { key: string; kind: MeterKind }[] = [
+ { key: "rolling", kind: "five_hour" },
+ { key: "weekly", kind: "calendar_week" },
+ { key: "monthly", kind: "product_period" },
 ];
 
 const METER_LABEL: Record<MeterKind, string> = {
@@ -73,15 +69,11 @@ const METER_SHORT: Record<MeterKind, string> = {
 };
 
 const DEFAULT_ORIGIN = "https://opencode.ai";
-/** Console session cookie; browsers on https use the `__Host-` prefixed name. */
-const DEFAULT_COOKIE_NAME = "__Host-console_session";
 const REFRESH_SECONDS = 300;
 const REQUEST_TIMEOUT_MS = 20_000;
-const USER_AGENT =
- "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 // ---------------------------------------------------------------------------
-// Config persistence (0600 file; cookie is a credential)
+// Config persistence (0600 file; the API key is a credential)
 // ---------------------------------------------------------------------------
 
 /** Resolved per call so tests can redirect it away from the real home. */
@@ -108,51 +100,39 @@ async function saveConfig(config: Config): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Fetch + parse (console JSON API)
+// Fetch + parse (ZEN API)
 // ---------------------------------------------------------------------------
-
-function cookieHeader(authCookie: string): string {
- const trimmed = authCookie.trim().replace(/;$/, "");
- return trimmed.includes("=") ? trimmed : `${DEFAULT_COOKIE_NAME}=${trimmed}`;
-}
 
 function asRecord(value: unknown): Record<string, unknown> | null {
  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
 }
 
-/** Money fields arrive as JSON strings (the server models them as bigint). */
-function toNumber(value: unknown): number | null {
- if (typeof value === "number") return Number.isFinite(value) ? value : null;
- if (typeof value === "string" && value.trim() !== "") {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
- }
- return null;
+/** ZEN sends `percent` as a 0-100 number; clamp to 0-100 and round to 0.1. */
+function toPercent(value: unknown): number | null {
+ let n: number;
+ if (typeof value === "number") n = value;
+ else if (typeof value === "string" && value.trim() !== "") n = Number(value);
+ else return null;
+ if (!Number.isFinite(n)) return null;
+ return Math.round(Math.min(100, Math.max(0, n)) * 10) / 10;
 }
 
 /**
- * Reads `access.meters` out of a `/console/api/go/status` payload. Returns an
- * empty array when the payload carries no meter windows — the caller reports
- * that as a changed API rather than as a confident zero.
+ * Reads `usage.{rolling,weekly,monthly}` out of a `/zen/go/v1/usage` payload.
+ * Returns an empty array when the payload carries no usable window — the caller
+ * reports that as a changed API rather than as a confident zero.
  */
-export function parseGoStatus(payload: unknown): UsageMeter[] {
- const access = asRecord(asRecord(payload)?.access);
- const meters = asRecord(access?.meters);
- if (!meters) return [];
- const periodEndMs = typeof access?.endsAt === "string" ? Date.parse(access.endsAt) : NaN;
+export function parseUsage(payload: unknown): UsageMeter[] {
+ const usage = asRecord(asRecord(payload)?.usage);
+ if (!usage) return [];
  const result: UsageMeter[] = [];
- for (const { key, kind, fallsBackToPeriodEnd } of WINDOW_KEYS) {
-  const window = asRecord(meters[key]);
+ for (const { key, kind } of WINDOW_KINDS) {
+  const window = asRecord(usage[key]);
   if (!window) continue;
-  const used = toNumber(window.usedMicroCents);
-  const limit = toNumber(window.limitMicroCents);
-  if (used === null || limit === null) continue;
-  // used share of the window limit, clamped to 0-100 and rounded to 0.1
-  const percent = limit > 0 ? Math.round(Math.min(100, Math.max(0, (used / limit) * 100)) * 10) / 10 : 0;
-  const ownResetMs = typeof window.resetsAt === "string" ? Date.parse(window.resetsAt) : NaN;
-  const resetsAtMs = Number.isFinite(ownResetMs)
-   ? ownResetMs
-   : fallsBackToPeriodEnd ? periodEndMs : NaN;
+  const percent = toPercent(window.percent);
+  if (percent === null) continue;
+  // Each window carries its own reset — no period-end fallback anymore.
+  const resetsAtMs = typeof window.resetsAt === "string" ? Date.parse(window.resetsAt) : NaN;
   result.push({
    kind,
    percent,
@@ -162,29 +142,21 @@ export function parseGoStatus(payload: unknown): UsageMeter[] {
  return result;
 }
 
-export async function fetchUsage(
- workspaceId: string,
- authCookie: string,
- origin = DEFAULT_ORIGIN,
-): Promise<UsageMeter[]> {
- if (!workspaceId.trim() || !authCookie.trim()) {
+export async function fetchUsage(apiKey: string, origin = DEFAULT_ORIGIN): Promise<UsageMeter[]> {
+ if (!apiKey.trim()) {
   throw { kind: "noCredentials" } as FetchFailure;
  }
- const url = `${origin.replace(/\/+$/, "")}/console/api/go/status`;
+ const url = `${origin.replace(/\/+$/, "")}/zen/go/v1/usage`;
  const controller = new AbortController();
  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
  let response: Response;
  try {
   response = await fetch(url, {
    headers: {
-    Cookie: cookieHeader(authCookie),
-    // The console scopes every request to a workspace with this header.
-    "x-org-id": workspaceId.trim(),
-    "User-Agent": USER_AGENT,
+    Authorization: `Bearer ${apiKey.trim()}`,
     Accept: "application/json",
    },
    signal: controller.signal,
-   redirect: "manual",
   });
  } catch (err) {
   if (err instanceof Error && err.name === "AbortError") {
@@ -197,25 +169,15 @@ export async function fetchUsage(
  } finally {
   clearTimeout(timer);
  }
- if (response.status >= 300 && response.status < 400) {
-  const location = response.headers.get("location") ?? "";
-  if (/auth|login|sign-?in/i.test(location)) throw { kind: "unauthorized" } as FetchFailure;
-  throw { kind: "http", status: response.status } as FetchFailure;
- }
  if (response.status === 401 || response.status === 403) {
   throw { kind: "unauthorized" } as FetchFailure;
  }
  if (!response.ok) throw { kind: "http", status: response.status } as FetchFailure;
  const payload: unknown = await response.json().catch(() => undefined);
  if (payload === undefined || payload === null) {
-  // A null body is the console's "no Go subscription here" answer.
-  if (payload === null) throw { kind: "noSubscription" } as FetchFailure;
   throw { kind: "noPayload" } as FetchFailure;
  }
- if (asRecord(asRecord(payload)?.access) === null) {
-  throw { kind: "noSubscription" } as FetchFailure;
- }
- const meters = parseGoStatus(payload);
+ const meters = parseUsage(payload);
  if (meters.length === 0) throw { kind: "noPayload" } as FetchFailure;
  return meters;
 }
@@ -248,19 +210,19 @@ export function countdown(resetsAt: string | null, now = Date.now()): string | n
 function describeFailure(f: FetchFailure): string {
  switch (f.kind) {
   case "noCredentials":
-   return "Not connected. Run /opencode-go --connect <wrk_…> <console-cookie>";
+   return "Not connected. Run /opencode-go --connect <api-key>";
   case "timeout":
    return "Request timed out";
   case "network":
    return `Network error: ${f.detail}`;
   case "unauthorized":
-   return "Session expired — reconnect with a fresh console cookie";
+   return "Invalid API key — check OPENCODE_GO_API_KEY or the saved key";
   case "http":
    return `HTTP ${f.status}`;
   case "noSubscription":
-   return "No Go subscription on this workspace";
+   return "No Go subscription on this account";
   case "noPayload":
-   return "Console API response unrecognised — opencode.ai may have changed its API";
+   return "ZEN API response unrecognised — opencode.ai may have changed its API";
  }
 }
 
@@ -284,22 +246,18 @@ export default function opencodeGoUsage(pi: ExtensionAPI): void {
  let lastFetchedAt = 0;
  let timer: ReturnType<typeof setInterval> | undefined;
 
- const resolvedCreds = (): { workspaceId: string; authCookie: string } | null => {
-  const workspaceId = (process.env.OPENCODE_GO_WORKSPACE_ID ?? config.workspaceId ?? "").trim();
-  const authCookie = (process.env.OPENCODE_GO_AUTH_COOKIE ?? config.authCookie ?? "").trim();
-  return workspaceId && authCookie ? { workspaceId, authCookie } : null;
+ const resolvedKey = (): string | null => {
+  const key = (process.env.OPENCODE_GO_API_KEY ?? config.apiKey ?? "").trim();
+  return key || null;
  };
 
- // Env credentials win over the saved ones, so a --connect/--disconnect can
- // silently do nothing while OPENCODE_GO_* is set. Surface that instead.
+ // Env key wins over the saved one, so a --connect/--key/--disconnect can
+ // silently do nothing while OPENCODE_GO_API_KEY is set. Surface that instead.
  const envOverrideWarning = (): string | null => {
-  const envWorkspace = process.env.OPENCODE_GO_WORKSPACE_ID?.trim();
-  const envCookie = process.env.OPENCODE_GO_AUTH_COOKIE?.trim();
-  const overrides =
-   (envWorkspace !== undefined && envWorkspace !== config.workspaceId) ||
-   (envCookie !== undefined && envCookie !== config.authCookie);
+  const envKey = process.env.OPENCODE_GO_API_KEY?.trim();
+  const overrides = envKey !== undefined && envKey !== config.apiKey;
   return overrides
-   ? "OPENCODE_GO_WORKSPACE_ID / OPENCODE_GO_AUTH_COOKIE are set and take precedence over saved values — update or unset them"
+   ? "OPENCODE_GO_API_KEY is set and takes precedence over the saved key — update or unset it"
    : null;
  };
 
@@ -317,9 +275,9 @@ export default function opencodeGoUsage(pi: ExtensionAPI): void {
 
  const renderStatus = (ctx: UiCtx): void => {
   if (!ctx.hasUI) return;
-  const creds = resolvedCreds();
-  if (!creds) {
-   ctx.ui.setStatus("opencode-go", "OpenCode Go: not connected (/opencode-go --connect)");
+  const key = resolvedKey();
+  if (!key) {
+   ctx.ui.setStatus("opencode-go", "OpenCode Go: not connected (/opencode-go --connect <api-key>)");
    return;
   }
   if (lastError) {
@@ -342,16 +300,15 @@ export default function opencodeGoUsage(pi: ExtensionAPI): void {
 
  const renderReport = (ctx: UiCtx): void => {
   if (!ctx.hasUI) return;
-  const creds = resolvedCreds();
+  const key = resolvedKey();
   const lines: string[] = ["OpenCode Go Usage"];
-  if (!creds) {
+  if (!key) {
    lines.push("Not connected.");
-   lines.push("Run /opencode-go --connect <wrk_…> <console-cookie>");
-   lines.push("Or set OPENCODE_GO_WORKSPACE_ID + OPENCODE_GO_AUTH_COOKIE");
+   lines.push("Run /opencode-go --connect <api-key>");
+   lines.push("Or set OPENCODE_GO_API_KEY");
    ctx.ui.setWidget("opencode-go", lines, { placement: "aboveEditor" });
    return;
   }
-  lines.push(`Workspace: ${creds.workspaceId}`);
   if (lastError) {
    lines.push(`Error: ${lastError}`);
   } else if (meters.length === 0) {
@@ -367,15 +324,15 @@ export default function opencodeGoUsage(pi: ExtensionAPI): void {
  };
 
  const refresh = async (ctx: UiCtx): Promise<void> => {
-  const creds = resolvedCreds();
-  if (!creds) {
+  const key = resolvedKey();
+  if (!key) {
    meters = [];
    lastError = null;
    renderStatus(ctx);
    return;
   }
   try {
-   meters = await fetchUsage(creds.workspaceId, creds.authCookie, DEFAULT_ORIGIN);
+   meters = await fetchUsage(key, DEFAULT_ORIGIN);
    lastError = null;
    lastFetchedAt = Date.now();
   } catch (err) {
@@ -391,7 +348,7 @@ export default function opencodeGoUsage(pi: ExtensionAPI): void {
    clearInterval(timer);
    timer = undefined;
   }
-  if (ctx.hasUI && resolvedCreds()) ctx.ui.notify("OpenCode Go usage tracker loaded", "info");
+  if (ctx.hasUI && resolvedKey()) ctx.ui.notify("OpenCode Go usage tracker loaded", "info");
   // Fire-and-forget: don't block session startup on a network round-trip.
   void refresh(ctx);
   // Plain setInterval with the callback body fully wrapped so a throw cannot
@@ -410,21 +367,19 @@ export default function opencodeGoUsage(pi: ExtensionAPI): void {
 
  pi.registerCommand("opencode-go", {
   description:
-   "Show OpenCode Go usage. Subcommands: --connect <wrk> <cookie> | --workspace <id> | --cookie <v> | --disconnect | --refresh | --compact [on|off] | --json",
+   "Show OpenCode Go usage. Subcommands: --connect <api-key> | --key <v> | --disconnect | --refresh | --compact [on|off] | --json",
   handler: async (args, ctx) => {
    const tokens = args.trim().split(/\s+/).filter(Boolean);
    const sub = tokens[0];
    const rest = tokens.slice(1);
 
    if (sub === "--connect" || sub === "--setup") {
-    const workspaceId = rest[0];
-    const cookie = rest.slice(1).join(" ");
-    if (!workspaceId || !cookie) {
-     ctx.ui.notify("Usage: /opencode-go --connect <wrk_…> <console-cookie>", "warning");
+    const apiKey = rest.join(" ").trim();
+    if (!apiKey) {
+     ctx.ui.notify("Usage: /opencode-go --connect <api-key>", "warning");
      return;
     }
-    config.workspaceId = workspaceId.trim();
-    config.authCookie = cookie.trim();
+    config.apiKey = apiKey;
     await saveConfig(config);
     const envWarning = envOverrideWarning();
     if (envWarning) ctx.ui.notify(envWarning, "warning");
@@ -434,37 +389,23 @@ export default function opencodeGoUsage(pi: ExtensionAPI): void {
     return;
    }
 
-   if (sub === "--workspace") {
-    if (!rest[0]) {
-     ctx.ui.notify("Usage: /opencode-go --workspace <wrk_…>", "warning");
+   if (sub === "--key" || sub === "--api-key") {
+    const apiKey = rest.join(" ").trim();
+    if (!apiKey) {
+     ctx.ui.notify("Usage: /opencode-go --key <api-key>", "warning");
      return;
     }
-    config.workspaceId = rest[0].trim();
+    config.apiKey = apiKey;
     await saveConfig(config);
     const envWarning = envOverrideWarning();
     if (envWarning) ctx.ui.notify(envWarning, "warning");
-    ctx.ui.notify(`Workspace set to ${config.workspaceId}`, "info");
-    return;
-   }
-
-   if (sub === "--cookie") {
-    const cookie = rest.join(" ");
-    if (!cookie) {
-     ctx.ui.notify("Usage: /opencode-go --cookie <console-cookie>", "warning");
-     return;
-    }
-    config.authCookie = cookie.trim();
-    await saveConfig(config);
-    const envWarning = envOverrideWarning();
-    if (envWarning) ctx.ui.notify(envWarning, "warning");
-    ctx.ui.notify("Cookie saved", "info");
+    ctx.ui.notify("API key saved", "info");
     return;
    }
 
    if (sub === "--disconnect") {
     const envWarning = envOverrideWarning();
-    delete config.workspaceId;
-    delete config.authCookie;
+    delete config.apiKey;
     await saveConfig(config);
     meters = [];
     lastError = null;
@@ -492,7 +433,7 @@ export default function opencodeGoUsage(pi: ExtensionAPI): void {
    if (sub === "--json") {
     await refresh(ctx);
     const report = {
-     workspaceId: resolvedCreds()?.workspaceId ?? null,
+     apiKeyConfigured: resolvedKey() !== null,
      fetchedAt: lastFetchedAt ? new Date(lastFetchedAt).toISOString() : null,
      error: lastError,
      meters,

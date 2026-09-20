@@ -20,3 +20,6 @@ Thumbs.db
 .omp/
 # Local Pi runtime state
 .atl/
+
+# ODD de pi
+.odd/

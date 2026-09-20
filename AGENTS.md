@@ -5,22 +5,20 @@
 
 ## What it does
 
-OpenCode publishes no usage API of its own, but the `/console/<wrk_…>/go` screen is a
-client-side app that loads its numbers from the console JSON API:
+OpenCode Go exposes usage through the ZEN API, keyed by an OpenCode Go API key:
 
 ```
-GET https://opencode.ai/console/api/go/status      header: x-org-id: wrk_…
--> { access: { meters: {
-      fiveHour: { resetsAt, limitMicroCents, usedMicroCents },
-      week:     { resetsAt, limitMicroCents, usedMicroCents },
-      month:    { limitMicroCents, usedMicroCents } } } }
+GET https://opencode.ai/zen/go/v1/usage      header: Authorization: Bearer <api-key>
+-> { usage: {
+      rolling: { status, percent, resetsAt },
+      weekly:  { status, percent, resetsAt },
+      monthly: { status, percent, resetsAt } } }
 ```
 
-The extension calls that endpoint with the user's `__Host-console_session` cookie and
-derives the three percentages (`used / limit`; money fields are micro-cents = 1e-8
-dollars) plus reset countdowns. It reports percentages and countdowns only. `fiveHour`
-and `week` carry their own `resetsAt`; `month` has no window, so its reset is the paid
-period end `access.endsAt` — the value the console page renders for "Monthly usage".
+The extension calls that endpoint with the user's Go API key and reads the three
+percentages (`percent` is already a 0-100 number, clamped and rounded to 0.1) plus
+reset countdowns. It reports percentages and countdowns only. Each window carries
+its own `resetsAt` ISO timestamp — there is no period-end fallback anymore.
 
 ## Build / test / lint
 
@@ -46,24 +44,23 @@ from `~/.omp/plugins/node_modules` when omp loads the plugin.
 
 - Single extension file; no build, no runtime deps. Bun globals (`fetch`, `setInterval`,
   `AbortController`) and `node:*` builtins only.
-- Pure logic (`parseGoStatus`, `fetchUsage`, `bar`, `countdown`) is exported from the
+- Pure logic (`parseUsage`, `fetchUsage`, `bar`, `countdown`) is exported from the
   extension module so tests import it without running the factory.
-- Credentials: `OPENCODE_GO_WORKSPACE_ID` / `OPENCODE_GO_AUTH_COOKIE` env vars (preferred), or
-  `/opencode-go --connect` which persists to `~/.omp/agent/opencode-go-usage.json` (mode 0600),
-  overridable with `OPENCODE_GO_CONFIG_PATH` (the test suite uses this so it never writes the
-  real file). Env vars win over the saved file, so `--connect`/`--cookie`/`--disconnect` warn
-  when they are being shadowed. The cookie may be a bare value (sent as
-  `__Host-console_session=<value>`) or a full `name=value; name2=value2` string.
+- Credentials: the `OPENCODE_GO_API_KEY` env var (wins), or `config.apiKey` saved by
+  `/opencode-go --connect <api-key>` / `--key <v>` to `~/.omp/agent/opencode-go-usage.json`
+  (mode 0600), overridable with `OPENCODE_GO_CONFIG_PATH` (the test suite uses this so it
+  never writes the real file). The env value wins over the saved key, so
+  `--connect`/`--key`/`--disconnect` warn when they are being shadowed.
 - Fetch failures are typed: `noCredentials` / `timeout` / `network` / `unauthorized` /
-  `http` / `noSubscription` / `noPayload`. `unauthorized` = session expired,
-  `noSubscription` = the console reports no Go plan on that workspace,
-  `noPayload` = the console API changed shape.
+  `http` / `noSubscription` / `noPayload`. `unauthorized` = the ZEN API rejected the key,
+  `noSubscription` = kept in the union but unused for now, `noPayload` = the ZEN API
+  changed shape (missing/empty `usage`, or every window unusable).
 
 ## Testing a live fetch
 
 ```bash
 bun -e 'import { fetchUsage } from "./extensions/opencode-go-usage.ts";
-fetchUsage("<wrk_…>", "<session-cookie>").then(console.log, e => console.log(e.kind));'
+fetchUsage("<api-key>").then(console.log, e => console.log(e.kind));'
 ```
 
 ## Install

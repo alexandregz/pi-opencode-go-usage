@@ -179,7 +179,7 @@ test("saving a key warns while the env var shadows it", async () => {
   const run = (args: string) =>
     (state.command!.options.handler as (a: string, c: unknown) => Promise<void>)(args, ctx);
 
-  // Never let a test touch ~/.omp/agent/opencode-go-usage.json.
+  // Never let a test touch the user's real config file.
   const dir = await mkdtemp(join(tmpdir(), "opencode-go-usage-test-"));
   const configFile = join(dir, "opencode-go-usage.json");
   process.env.OPENCODE_GO_CONFIG_PATH = configFile;

@@ -54,13 +54,13 @@ Establece a variable de ambiente (recomendado — mantén a clave fóra do histo
 export OPENCODE_GO_API_KEY='…'
 ```
 
-ou usa o comando de barra (gárdase en `~/.omp/agent/opencode-go-usage.json`, modo 0600):
+ou usa o comando de barra (gárdase en `$XDG_CONFIG_HOME/opencode-go-usage/config.json` (ou `~/.config/opencode-go-usage/config.json`), modo 0600):
 
 ```
 /opencode-go --connect <api-key>
 ```
 
-As variables de ambiente **teñen prioridade** sobre o ficheiro gardado: mentres `OPENCODE_GO_API_KEY` estea definida, `--connect` / `--key` gárdana pero non teñen efecto (o comando avisa cando o detecta). Desactívaa ou exporta o novo valor. `OPENCODE_GO_CONFIG_PATH` substitúe a localización do ficheiro (por defecto `~/.omp/agent/opencode-go-usage.json`).
+As variables de ambiente **teñen prioridade** sobre o ficheiro gardado: mentres `OPENCODE_GO_API_KEY` estea definida, `--connect` / `--key` gárdana pero non teñen efecto (o comando avisa cando o detecta). Desactívaa ou exporta o novo valor. `OPENCODE_GO_CONFIG_PATH` substitúe a localización do ficheiro (por defecto `$XDG_CONFIG_HOME/opencode-go-usage/config.json`, ou `~/.config/opencode-go-usage/config.json`).
 
 ## Comandos
 
@@ -72,7 +72,7 @@ As variables de ambiente **teñen prioridade** sobre o ficheiro gardado: mentres
 | `/opencode-go --disconnect`             | Esquece a clave                                               |
 | `/opencode-go --refresh`                | Obtén os datos de novo agora                                  |
 | `/opencode-go --compact [on\|off]`      | Alterna a barra de estado compacta (`Go: 5h 0% · wk 2% · mo 2%`) |
-| `/opencode-go --json`                   | Exporta o informe a `~/.omp/agent/opencode-go-usage-report.json` |
+| `/opencode-go --json`                   | Exporta o informe a `$XDG_CONFIG_HOME/opencode-go-usage/usage-report.json` (ou `~/.config/opencode-go-usage/usage-report.json`) |
 
 O uso actualízase automaticamente cada 5 minutos.
 

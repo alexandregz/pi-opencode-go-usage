@@ -60,7 +60,7 @@ Either set the env var (recommended — keeps the key out of session history):
 export OPENCODE_GO_API_KEY='…'
 ```
 
-or use the slash command (persists to `~/.omp/agent/opencode-go-usage.json`, mode 0600):
+or use the slash command (persists to `$XDG_CONFIG_HOME/opencode-go-usage/config.json` (or `~/.config/opencode-go-usage/config.json`), mode 0600):
 
 ```
 /opencode-go --connect <api-key>
@@ -69,7 +69,7 @@ or use the slash command (persists to `~/.omp/agent/opencode-go-usage.json`, mod
 Env vars **take precedence** over the saved file: while `OPENCODE_GO_API_KEY` is
 set, `--connect` / `--key` save but have no effect (the command warns when it
 detects this). Unset it, or export the new value. `OPENCODE_GO_CONFIG_PATH`
-overrides where the file lives (default `~/.omp/agent/opencode-go-usage.json`).
+overrides where the file lives (default `$XDG_CONFIG_HOME/opencode-go-usage/config.json`, or `~/.config/opencode-go-usage/config.json`).
 
 ## Commands
 
@@ -81,7 +81,7 @@ overrides where the file lives (default `~/.omp/agent/opencode-go-usage.json`).
 | `/opencode-go --disconnect`             | Forget the key                                                |
 | `/opencode-go --refresh`                | Fetch again now                                               |
 | `/opencode-go --compact [on\|off]`      | Toggle compact status bar (`Go: 5h 0% · wk 2% · mo 2%`)       |
-| `/opencode-go --json`                   | Export report to `~/.omp/agent/opencode-go-usage-report.json` |
+| `/opencode-go --json`                   | Export report to `$XDG_CONFIG_HOME/opencode-go-usage/usage-report.json` (or `~/.config/opencode-go-usage/usage-report.json`) |
 
 Usage refreshes automatically every 5 minutes.
 

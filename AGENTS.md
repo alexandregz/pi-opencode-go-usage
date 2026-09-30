@@ -47,7 +47,7 @@ from `~/.omp/plugins/node_modules` when omp loads the plugin.
 - Pure logic (`parseUsage`, `fetchUsage`, `bar`, `countdown`) is exported from the
   extension module so tests import it without running the factory.
 - Credentials: the `OPENCODE_GO_API_KEY` env var (wins), or `config.apiKey` saved by
-  `/opencode-go --connect <api-key>` / `--key <v>` to `~/.omp/agent/opencode-go-usage.json`
+  `/opencode-go --connect <api-key>` / `--key <v>` to `$XDG_CONFIG_HOME/opencode-go-usage/config.json` (or `~/.config/opencode-go-usage/config.json`)
   (mode 0600), overridable with `OPENCODE_GO_CONFIG_PATH` (the test suite uses this so it
   never writes the real file). The env value wins over the saved key, so
   `--connect`/`--key`/`--disconnect` warn when they are being shadowed.

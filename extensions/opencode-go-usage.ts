@@ -78,9 +78,19 @@ const REQUEST_TIMEOUT_MS = 20_000;
 
 /** Resolved per call so tests can redirect it away from the real home. */
 function configPath(): string {
- return (
-  process.env.OPENCODE_GO_CONFIG_PATH ?? join(homedir(), ".omp", "agent", "opencode-go-usage.json")
- );
+ const configuredPath = process.env.OPENCODE_GO_CONFIG_PATH;
+ if (configuredPath) return configuredPath;
+ const configHome = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
+ return join(configHome, "opencode-go-usage", "config.json");
+}
+
+function reportPath(): string {
+ const configHome = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
+ return join(configHome, "opencode-go-usage", "usage-report.json");
+}
+
+async function ensureParentDirectory(path: string): Promise<void> {
+ await fs.mkdir(join(path, ".."), { recursive: true, mode: 0o700 });
 }
 
 async function loadConfig(): Promise<Config> {
@@ -94,6 +104,7 @@ async function loadConfig(): Promise<Config> {
 
 async function saveConfig(config: Config): Promise<void> {
  const path = configPath();
+ await ensureParentDirectory(path);
  const tmp = `${path}.tmp`;
  await fs.writeFile(tmp, JSON.stringify(config, null, 2), { mode: 0o600 });
  await fs.rename(tmp, path);
@@ -438,8 +449,9 @@ export default function opencodeGoUsage(pi: ExtensionAPI): void {
      error: lastError,
      meters,
     };
-    const outPath = join(homedir(), ".omp", "agent", "opencode-go-usage-report.json");
+    const outPath = reportPath();
     try {
+     await ensureParentDirectory(outPath);
      const tmp = `${outPath}.tmp`;
      await fs.writeFile(tmp, JSON.stringify(report, null, 2), "utf8");
      await fs.rename(tmp, outPath);
